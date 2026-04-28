@@ -139,7 +139,7 @@ def encrypt_param(s: str) -> str:
     return base64.urlsafe_b64encode(data).decode()
         
 
-async def get_iframe(url: str, ep: int, ver: Literal['sub', 'softsub', 'dub']) -> str:
+async def get_iframe(url: str, ep: int, ver: str) -> str:
     status, resp = await request(url, f=lambda r: r.text())
     if status != 200 or resp is None:
         raise InvalidResponse(url)
@@ -203,10 +203,10 @@ async def get_iframe(url: str, ep: int, ver: Literal['sub', 'softsub', 'dub']) -
 
     return resp['result']
 
-def decrypt_iframe(cipher: str) -> str:
+def decrypt_iframe(cipher: str) -> dict:
     data = apply_rounds(base64.urlsafe_b64decode(cipher + "=="), IFRAME_ROUNDS)
     res = ''.join(chr(i) for i in data)
-    return json.loads(urllib.parse.unquote(res))['url']
+    return json.loads(urllib.parse.unquote(res))
 
 async def decrypt_sources(iframe: str) -> dict:
     status, resp = await request(iframe, f=lambda r: r.text())
@@ -260,14 +260,23 @@ async def decrypt_sources(iframe: str) -> dict:
     return json.loads(urllib.parse.unquote(res))
 
 
-async def main():
-    iframe = await get_iframe("https://animekai.to/watch/h2o-footprints-in-the-sand-rwkl", 1, "sub")
+async def extract(url: str, ep: int, ver: Literal['sub', 'softsub', 'dub']):
+    iframe = await get_iframe(url, ep, ver)
     print(f"{iframe=}")
 
     embedded = decrypt_iframe(iframe)
     print(f"{embedded=}")
 
-    sources = await decrypt_sources(embedded)
+    sources = await decrypt_sources(embedded['url'])
     print(f"{sources=}")
 
-asyncio.run(main())
+    embedded.pop('url')
+    embedded['sources'] = sources
+    
+    return embedded
+
+async def main():
+    res = await extract("https://animekai.to/watch/h2o-footprints-in-the-sand-rwkl", 1, "sub")
+    print(json.dumps(res, indent=2))
+
+asyncio.run((main()))
