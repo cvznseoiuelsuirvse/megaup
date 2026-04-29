@@ -1,8 +1,8 @@
 import json
 import random
+import asyncio
 import re
 import urllib.parse
-import asyncio
 import aiohttp
 import base64
 from typing import Callable, Literal, Awaitable
@@ -92,7 +92,7 @@ def transform(
     return bytes(out)
 
 def rc4(key: bytes, data: bytes) -> bytes:
-    s = [i for i in range(256)]
+    s = list(range(256))
     j = 0
 
     for i in range(256):
@@ -133,150 +133,149 @@ def apply_rounds(data: bytes, rounds: list, key_transform: Callable[[bytes], byt
 
     return data
 
-
 def encrypt_param(s: str) -> str:
     data = apply_rounds(s.encode(), PARAMS_ROUNDS)
     return base64.urlsafe_b64encode(data).decode()
+
+
+class Megaup:
+    @staticmethod
+    async def get_iframe(url: str, ep: int, ver: str) -> str:
+        async def fetch(url: str, params: dict) -> dict:
+            status, resp = await request(url, params=params, f=lambda r: r.json())
+            if status != 200 or resp is None:
+                raise InvalidResponse
+            return resp
+
+        status, resp = await request(url, f=lambda r: r.text())
+        if status != 200 or resp is None:
+            raise InvalidResponse(url)
+
+        m = re.search(r'({"page".+?})', resp)
+        if not m:
+            raise SyncDataNotFound
+
+        sync_data = json.loads(m.group(1))
+
+        list_episodes_url = "https://animekai.to/ajax/episodes/list"
+        list_episodes_params = {
+            "ani_id": sync_data['anime_id'],
+            "_": encrypt_param(sync_data['anime_id'])
+        }
+
+        resp = await fetch(list_episodes_url, list_episodes_params)
+        result = resp['result']
+
+        tokens = re.findall(r'token="([\w-]+)"', result)
+        if not tokens:
+            raise EpisodeTokensNotFound
+
+        assert(ep <= len(tokens))
+
+        token = tokens[ep-1]
+
+        list_links_url = "https://animekai.to/ajax/links/list"
+        list_links_params = {
+            "token": token,
+            "_": encrypt_param(token),
+        }
+
+        resp = await fetch(list_links_url, list_links_params)
+        result = resp['result']
+
+        m = re.search(rf'data-id="{ver}" style="display: (?:none)?;">.+?data-lid="([\w-]+)"', result)
+        if not m:
+            raise EpisodeNotFound(ver)
+
+        data_lid = m.group(1)
+
+        links_view_url = "https://animekai.to/ajax/links/view"
+        links_view_params = {
+            "id": data_lid,
+            "_": encrypt_param(data_lid)
+        }
+
+        resp = await fetch(links_view_url, links_view_params)
+        return resp['result']
+
+    @staticmethod
+    def decrypt_iframe(cipher: str) -> dict:
+        data = apply_rounds(base64.urlsafe_b64decode(cipher + "=="), IFRAME_ROUNDS)
+        res = data.decode("latin-1")
+        return json.loads(urllib.parse.unquote(res))
+
+    @staticmethod
+    async def decrypt_sources(iframe: str) -> dict:
+        status, resp = await request(iframe, f=lambda r: r.text())
+        assert(status == 200) 
+        assert(resp is not None)
         
+        m = re.search(r'iframe src="(https:\/\/megaup.n.\/e\/[\w-]+)\?"', resp)
+        if not m:
+            raise ValueError("embedded url not found")
+        
+        embedded_url = m.group(1)
+        embedded_url = embedded_url.replace("/e/", "/media/")
 
-async def get_iframe(url: str, ep: int, ver: str) -> str:
-    status, resp = await request(url, f=lambda r: r.text())
-    if status != 200 or resp is None:
-        raise InvalidResponse(url)
+        cookie_key = to_base(sum(ord(c) for c in USER_AGENT), 23)
+        cookie_val = to_base(random.randint(0, 90000), 23)
+        
+        cookies = {cookie_key: cookie_val}
+        headers = {"User-Agent": USER_AGENT, "Referer": embedded_url}
 
-    m = re.search(r'({"page".+?})', resp)
-    if not m:
-        raise SyncDataNotFound
+        status, resp = await request(
+            embedded_url, 
+            cookies=cookies, 
+            headers=headers, 
+            params={"autostart": "true"}, 
+            f=lambda r: r.json()
+        )
+        assert(status == 200)
+        assert(resp is not None)
 
-    sync_data = json.loads(m.group(1))
+        user_agent_key = re.sub(r"[^A-Z0-9]", "", USER_AGENT)[-30:]
 
-    list_episodes_url = "https://animekai.to/ajax/episodes/list"
-    list_episodes_params = {
-        "ani_id": sync_data['anime_id'],
-        "_": encrypt_param(sync_data['anime_id'])
-    }
+        def t_key_apply_transform(key: bytes) -> bytes:
+            out = list(map(int, key))
 
-    print(list_episodes_url, list_episodes_params)
-    status, resp = await request(list_episodes_url, params=list_episodes_params, f=lambda r: r.json())
-    if status != 200 or resp is None:
-        raise InvalidResponse
+            i = 0
+            while i < len(key):
+                out[i] = ord(user_agent_key[i % len(user_agent_key)])
+                i += 4
 
-    result = resp['result']
+            i = 0
+            while i < len(key):
+                out[i] = ord(cookie_val[i % len(cookie_val)])
+                i += 6
 
-    tokens = re.findall(r'token="([\w-]+)"', result)
-    if not tokens:
-        raise EpisodeTokensNotFound
-
-    assert(ep <= len(tokens))
-
-    token = tokens[ep-1]
-
-    list_links_url = "https://animekai.to/ajax/links/list"
-    list_links_params = {
-        "token": token,
-        "_": encrypt_param(token),
-    }
-
-    print(list_links_url, list_links_params)
-    status, resp = await request(list_links_url, params=list_links_params, f=lambda r: r.json())
-    if status != 200 or resp is None:
-        raise InvalidResponse
-
-    result = resp['result']
-
-    m = re.search(rf'data-id="{ver}" style="display: (?:none)?;">.+?data-lid="([\w-]+)"', result)
-    if not m:
-        raise EpisodeNotFound(ver)
-
-    data_lid = m.group(1)
-
-    links_view_url = "https://animekai.to/ajax/links/view"
-    links_view_params = {
-        "id": data_lid,
-        "_": encrypt_param(data_lid)
-    }
-
-    print(links_view_url, links_view_params)
-    status, resp = await request(links_view_url, params=links_view_params, f=lambda r: r.json())
-    if status != 200 or resp is None:
-        raise InvalidResponse
-
-    return resp['result']
-
-def decrypt_iframe(cipher: str) -> dict:
-    data = apply_rounds(base64.urlsafe_b64decode(cipher + "=="), IFRAME_ROUNDS)
-    res = ''.join(chr(i) for i in data)
-    return json.loads(urllib.parse.unquote(res))
-
-async def decrypt_sources(iframe: str) -> dict:
-    status, resp = await request(iframe, f=lambda r: r.text())
-    assert(status == 200) 
-    assert(resp is not None)
-    
-    m = re.search(r'iframe src="(https:\/\/megaup.n.\/e\/\w+)\?"', resp)
-    if not m:
-        raise ValueError("embedded url not found")
-    
-    embedded_url = m.group(1)
-    embedded_url = embedded_url.replace("/e/", "/media/")
-
-    cookie_key = to_base(sum(ord(c) for c in USER_AGENT), 23)
-    cookie_val = to_base(random.randint(0, 90000), 23)
-    
-    cookies = {cookie_key: cookie_val}
-    headers = {"User-Agent": USER_AGENT, "Referer": embedded_url}
-
-    status, resp = await request(
-        embedded_url, 
-        cookies=cookies, 
-        headers=headers, 
-        params={"autostart": "true"}, 
-        f=lambda r: r.json()
-    )
-    assert(status == 200)
-    assert(resp is not None)
-
-    user_agent_key = re.sub(r"[^A-Z0-9]", "", USER_AGENT)[-30:]
-
-    def t_key_apply_transform(key: bytes) -> bytes:
-        out = list(map(int, key))
-
-        i = 0
-        while i < len(key):
-            out[i] = ord(user_agent_key[i % len(user_agent_key)])
-            i += 4
-
-        i = 0
-        while i < len(key):
-            out[i] = ord(cookie_val[i % len(cookie_val)])
-            i += 6
-
-        return bytes(out)
+            return bytes(out)
 
 
-    sources = resp['result']
-    data = apply_rounds(base64.urlsafe_b64decode(sources + "=="), SOURCES_ROUNDS, t_key_apply_transform)
-    res = ''.join(chr(i) for i in data)
-    return json.loads(urllib.parse.unquote(res))
+        sources = resp['result']
+        data = apply_rounds(base64.urlsafe_b64decode(sources + "=="), SOURCES_ROUNDS, t_key_apply_transform)
+        res = data.decode("latin-1")
+        return json.loads(urllib.parse.unquote(res))
 
 
-async def extract(url: str, ep: int, ver: Literal['sub', 'softsub', 'dub']):
-    iframe = await get_iframe(url, ep, ver)
-    print(f"{iframe=}")
+    @classmethod
+    async def extract(cls, url: str, ep: int, ver: Literal['sub', 'softsub', 'dub']) -> dict:
+        iframe = await cls.get_iframe(url, ep, ver)
+        embedded = cls.decrypt_iframe(iframe)
 
-    embedded = decrypt_iframe(iframe)
-    print(f"{embedded=}")
+        intro = embedded['skip']['intro'][0], embedded['skip']['intro'][1]
+        outro = embedded['skip']['outro'][0], embedded['skip']['outro'][1]
 
-    sources = await decrypt_sources(embedded['url'])
-    print(f"{sources=}")
+        sources = await cls.decrypt_sources(embedded['url'])
 
-    embedded.pop('url')
-    embedded['sources'] = sources
-    
-    return embedded
+        return {
+                "sources":sources['sources'],
+                "tracks": sources['tracks'],
+                "intro": intro,
+                "outro": outro
+                }
 
 async def main():
-    res = await extract("https://animekai.to/watch/h2o-footprints-in-the-sand-rwkl", 1, "sub")
+    res = await Megaup.extract("https://animekai.to/watch/h2o-footprints-in-the-sand-rwkl", 1, "sub")
     print(json.dumps(res, indent=2))
 
 asyncio.run((main()))
